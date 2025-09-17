@@ -1534,29 +1534,22 @@ class FalconH1ForCausalLM(FalconH1PreTrainedModel, GenerationMixin):
 
         hidden_states = outputs[0]
         loss = None
-        if labels is not None:
-            # CCEを使用して損失を計算
-            # 巨大なlogits行列をメモリ上に生成せずに、hidden_statesから直接損失を計算します。
-            # shift=1 は、因果言語モデルで一般的な「次のトークンを予測する」ためのラベルと入力のシフトを
-            # 効率的に内部処理するためのオプションです。
-            loss = linear_cross_entropy(
-                hidden_states,                  # モデルの最終層の出力 (embeddings)
-                self.lm_head.weight,            # 分類器の重み
-                labels,                         # ラベル
-                shift=1,                        # ラベルと入力を効率的にシフト
-                ignore_index=-100               # パディングトークンを無視 (transformersの標準)
-            )
-            # lm_head_multiplierを適用します。CCEは線形変換に作用するため、
-            # hidden_statesかlm_head.weightのどちらかに乗算すればOKです。
-            # ここではlossに直接乗算します。（あるいは hidden_states * self.model.lm_head_multiplier としても良い）
-            loss = loss * self.model.lm_head_multiplier
+        logits = None
 
-        # 損失計算とは別に、出力としてlogitsを計算します。
-        # これにより、評価時などにlogitsが必要な場合にも対応できます。
-        # CCEのメモリ削減効果は、主に逆伝播時にこのlogitsの計算グラフが不要になる点にあります。
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :]) * self.model.lm_head_multiplier
-        # ↑↑↑ ここまで変更 ↑↑↑
+        if labels is not None:
+            # When training, compute loss using CCE without materializing logits.
+            # CCE handles the label shifting internally when shift=1 is passed.
+            loss = linear_cross_entropy(
+                hidden_states * self.model.lm_head_multiplier,
+                self.lm_head.weight,
+                labels,
+                shift=1,
+            )
+        else:
+            # During inference, compute logits as usual.
+            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+            logits = self.lm_head(hidden_states[:, slice_indices, :]) * self.model.lm_head_multiplier
 
         return CausalLMOutputWithPast(
             loss=loss,
