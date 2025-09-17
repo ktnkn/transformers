@@ -57,6 +57,9 @@ from ...utils.import_utils import is_causal_conv1d_available, is_mamba_2_ssm_ava
 from .configuration_falcon_h1 import FalconH1Config
 
 
+from cut_cross_entropy import linear_cross_entropy
+
+
 if is_mamba_2_ssm_available():
     from mamba_ssm.ops.triton.selective_state_update import selective_state_update
     from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined
