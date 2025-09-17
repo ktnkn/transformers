@@ -1295,13 +1295,23 @@ class FalconH1ForCausalLM(LlamaForCausalLM):
         )
 
         hidden_states = outputs[0]
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :]) * self.model.lm_head_multiplier
-
         loss = None
+        logits = None
+
         if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            # When training, compute loss using CCE without materializing logits.
+            # CCE handles the label shifting internally when shift=1 is passed.
+            loss = linear_cross_entropy(
+                hidden_states * self.model.lm_head_multiplier,
+                self.lm_head.weight,
+                labels,
+                shift=1,
+            )
+        else:
+            # During inference, compute logits as usual.
+            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+            logits = self.lm_head(hidden_states[:, slice_indices, :]) * self.model.lm_head_multiplier
 
         return CausalLMOutputWithPast(
             loss=loss,
