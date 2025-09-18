@@ -45,6 +45,7 @@ from ...utils.deprecation import deprecate_kwarg
 from ...utils.generic import check_model_inputs
 from .configuration_smollm3 import SmolLM3Config
 
+from cut_cross_entropy import linear_cross_entropy
 import copy
 
 
