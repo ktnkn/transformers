@@ -174,9 +174,11 @@ class SmolLM3Config(PretrainedConfig):
         bos_token_id=128000,
         eos_token_id=128001,
         rope_theta=2000000.0,
+        sliding_rope_theta=None,  # <--- 追加: Sliding window用のrope_theta
         rope_scaling=None,
-        use_sliding_window=False,
-        sliding_window=None,
+        use_sliding_window=False, 
+        sliding_window=512, # sliding_windowのデフォルト値を設定
+        attention_layer_ratio=(5, 1), # <--- 追加: (sliding, global) の比率
         no_rope_layers=None,
         no_rope_layer_interval=4,
         layer_types=None,
@@ -198,8 +200,10 @@ class SmolLM3Config(PretrainedConfig):
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
-        self.use_sliding_window = use_sliding_window
+
+        self.use_sliding_window = attention_layer_ratio is not None and attention_layer_ratio[0] > 0  #swaを追加
         self.sliding_window = sliding_window
+        self.attention_layer_ratio = attention_layer_ratio
 
         # for backward compatibility
         if num_key_value_heads is None:
@@ -211,6 +215,7 @@ class SmolLM3Config(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
         self.rope_theta = rope_theta
+        self.sliding_rope_theta = sliding_rope_theta if sliding_rope_theta is not None else rope_theta #slidinw attentionのthetaがない場合はglobalを参照
         self.rope_scaling = rope_scaling
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
@@ -224,15 +229,25 @@ class SmolLM3Config(PretrainedConfig):
 
         self.no_rope_layer_interval = no_rope_layer_interval
 
-        # Update layer_types based on sliding window and NoPE pattern
+        # Update layer_types based on sliding window ratio
         if layer_types is None:
             layer_types = []
-            for layer_idx in range(num_hidden_layers):
-                has_rope = self.no_rope_layers[layer_idx]
-                if use_sliding_window and sliding_window is not None and not has_rope:
-                    layer_types.append("sliding_attention")
-                else:
-                    layer_types.append("full_attention")
+            if self.use_sliding_window and self.attention_layer_ratio:
+                num_sliding, num_global = self.attention_layer_ratio
+                total_ratio = num_sliding + num_global
+                for i in range(self.num_hidden_layers):
+                    pos_in_pattern = i % total_ratio
+                    if pos_in_pattern < num_sliding:
+                        layer_types.append("sliding_attention")
+                    else:
+                        layer_types.append("full_attention")
+            else:
+                 # attention_layer_ratioが指定されていない場合は、すべてfull_attention
+                layer_types = ["full_attention"] * self.num_hidden_layers
+
+
+
+
 
         self.layer_types = layer_types
         layer_type_validation(self.layer_types)
