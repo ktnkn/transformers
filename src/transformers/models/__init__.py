@@ -307,6 +307,7 @@ if TYPE_CHECKING:
     from .shieldgemma2 import *
     from .siglip import *
     from .siglip2 import *
+    from .smollm3 import *
     from .smolvlm import *
     from .speech_encoder_decoder import *
     from .speech_to_text import *
