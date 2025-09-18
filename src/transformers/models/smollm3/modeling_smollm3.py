@@ -490,11 +490,17 @@ class SmolLM3ForCausalLM(SmolLM3PreTrainedModel, GenerationMixin):
         hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
-
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+        # When using linear_cross_entropy, we pass the hidden_states (embeddings) directly,
+        # the classifier weights (self.lm_head.weight), and the labels.
+        # The shift=1 argument automatically handles the common causal language modeling shift.
+        # The recommended implementation "cce" is explicitly chosen for memory efficiency and speed.
+        loss = linear_cross_entropy(
+            hidden_states,
+            self.lm_head.weight, # Classifier weights
+            labels,
+            shift=1, # Automatically handles shifting for causal language modeling
+            impl="cce", # Use the CCE kernel
+        )
 
         return CausalLMOutputWithPast(
             loss=loss,
