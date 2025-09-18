@@ -518,23 +518,27 @@ class SmolLM3ForCausalLM(SmolLM3PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+
+        # 👇 Logitsの計算を元に戻します。これは forward の戻り値として必要です。
+        #    Trainerなどが評価時にこれを使用します。
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        # When using linear_cross_entropy, we pass the hidden_states (embeddings) directly,
-        # the classifier weights (self.lm_head.weight), and the labels.
-        # The shift=1 argument automatically handles the common causal language modeling shift.
-        # The recommended implementation "cce" is explicitly chosen for memory efficiency and speed.
-        loss = linear_cross_entropy(
-            hidden_states,
-            self.lm_head.weight, # Classifier weights
-            labels,
-            shift=1, # Automatically handles shifting for causal language modeling
-            impl="cce", # Use the CCE kernel
-        )
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        loss = None
+        if labels is not None:
+            # 👇 損失計算はCCEを使用します。
+            #    これにより、逆伝播時に巨大なlogits行列の勾配がメモリに確保されるのを防ぎます。
+            loss = linear_cross_entropy(
+                hidden_states,
+                self.lm_head.weight, # Classifier weights
+                labels,
+                shift=1, # Automatically handles shifting for causal language modeling
+                impl="cce", # Use the CCE kernel
+            )
 
         return CausalLMOutputWithPast(
             loss=loss,
-            logits=logits,
+            logits=logits, # logitsが定義された状態で返します
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
