@@ -45,6 +45,8 @@ from ...utils.deprecation import deprecate_kwarg
 from ...utils.generic import check_model_inputs
 from .configuration_smollm3 import SmolLM3Config
 
+import copy
+
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -303,7 +305,7 @@ class SmolLM3PreTrainedModel(PreTrainedModel):
 class SmolLM3RotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor  # fix linting for `register_buffer`
 
-    def __init__(self, config: SmolLM3Config, device=None):
+    def __init__(self, config: SmolLM3Config, rope_theta_value: float, device=None): # <--- rope_theta_value を引数に追加
         super().__init__()
         # BC: "rope_type" was originally "type"
         if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
@@ -314,9 +316,12 @@ class SmolLM3RotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
+        # ROPE_INIT_FUNCTIONSはconfigオブジェクト全体を期待するため、config.rope_thetaを一時的に上書きしたtemp_configを渡す
+        temp_config = copy.deepcopy(config)
+        temp_config.rope_theta = rope_theta_value
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        inv_freq, self.attention_scaling = self.rope_init_fn(temp_config, device) # <--- 変更
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
@@ -348,7 +353,16 @@ class SmolLM3Model(SmolLM3PreTrainedModel):
             [SmolLM3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = SmolLM3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = SmolLM3RotaryEmbedding(config=config)
+
+        # --- ここから変更 ---
+        # グローバルアテンション用のRotary Embedding
+        self.rotary_emb_global = SmolLM3RotaryEmbedding(config=config, rope_theta_value=config.rope_theta)
+        
+        self.has_sliding_layers = "sliding_attention" in self.config.layer_types
+        if self.has_sliding_layers:
+            # スライディングアテンション用のRotary Embedding
+            self.rotary_emb_sliding = SmolLM3RotaryEmbedding(config=config, rope_theta_value=config.sliding_rope_theta)
+        # --- ここまで変更 ---
         self.gradient_checkpointing = False
         self.has_sliding_layers = "sliding_attention" in self.config.layer_types
 
@@ -408,9 +422,24 @@ class SmolLM3Model(SmolLM3PreTrainedModel):
         hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        # --- ここから変更 ---
+        # 2種類の位置埋め込みを事前に計算
+        position_embeddings_global = self.rotary_emb_global(hidden_states, position_ids)
+        if self.has_sliding_layers:
+            position_embeddings_sliding = self.rotary_emb_sliding(hidden_states, position_ids)
+        # --- ここまで変更 ---
+
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+            
+            # --- ここから変更 ---
+            # レイヤーのタイプに応じて適切な位置埋め込みを選択
+            if decoder_layer.attention_type == "sliding_attention":
+                current_position_embeddings = position_embeddings_sliding
+            else: # "full_attention"
+                current_position_embeddings = position_embeddings_global
+            # --- ここまで変更 ---
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[decoder_layer.attention_type],
@@ -418,16 +447,16 @@ class SmolLM3Model(SmolLM3PreTrainedModel):
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                position_embeddings=position_embeddings,
+                position_embeddings=current_position_embeddings,
                 **kwargs,
             )
+
 
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
         )
-
 
 @auto_docstring
 class SmolLM3ForCausalLM(SmolLM3PreTrainedModel, GenerationMixin):
